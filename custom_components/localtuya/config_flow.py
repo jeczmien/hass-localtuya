@@ -1063,13 +1063,23 @@ def mergeDevicesList(localList: dict, cloudList: dict, addSubDevices=True) -> di
     """Merge CloudDevices with Discovered LocalDevices (in specific ways)!"""
     # try Get SubDevices.
     newList = localList.copy()
+    local_cloud_gateways = {
+        dev_id: localList[dev_id]
+        for dev_id, dev_data in cloudList.items()
+        if dev_id in localList and not dev_data.get(CONF_NODE_ID)
+    }
+
     for _devID, _devData in cloudList.items():
         try:
             is_online = _devData.get("online", None)
             sub_device = _devData.get(CONF_NODE_ID, False)
-            # We skip offline devices and already merged devices.
-            if not is_online or _devID in localList:
+            # We skip offline local devices and already merged devices.
+            if _devID in localList:
                 continue
+
+            if not is_online and not sub_device:
+                continue
+
             # Make sure the device isn't already in localList.
             if addSubDevices and sub_device:
                 # infrared are ir remote sub-devices
@@ -1077,7 +1087,12 @@ def mergeDevicesList(localList: dict, cloudList: dict, addSubDevices=True) -> di
                     continue
 
                 gateway = get_gateway_by_deviceid(_devID, cloudList)
-                local_gw = localList.get(gateway.id)
+                gateway_id = gateway.id if gateway else None
+                local_gw = localList.get(gateway_id) if gateway_id else None
+
+                if not local_gw and len(local_cloud_gateways) == 1:
+                    gateway_id, local_gw = next(iter(local_cloud_gateways.items()))
+
                 if local_gw:
                     # Create a data for sub_device [cloud and local gateway] to merge it with discovered devices.
                     dev_data = {
@@ -1086,7 +1101,7 @@ def mergeDevicesList(localList: dict, cloudList: dict, addSubDevices=True) -> di
                             CONF_TUYA_GWID: _devID,
                             CONF_TUYA_VERSION: local_gw.get(CONF_TUYA_VERSION, "auto"),
                             CONF_NODE_ID: _devData.get(CONF_NODE_ID, None),
-                            CONF_GATEWAY_ID: local_gw.get(CONF_TUYA_GWID),
+                            CONF_GATEWAY_ID: local_gw.get(CONF_TUYA_GWID, gateway_id),
                         }
                     }
                     newList.update(dev_data)

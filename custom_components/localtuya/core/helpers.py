@@ -91,23 +91,46 @@ class templates:
 ##       config flows         ##
 ################################
 
-from ..const import CONF_LOCAL_KEY, CONF_NODE_ID
+from ..const import CONF_GATEWAY_ID, CONF_LOCAL_KEY, CONF_NODE_ID
 
 GATEWAY = NamedTuple("Gateway", [("id", str), ("data", dict)])
 
 
-def get_gateway_by_deviceid(device_id: str, cloud_data: dict) -> GATEWAY:
+GATEWAY_ID_KEYS = (
+    CONF_GATEWAY_ID,
+    "gatewayId",
+    "gateway_id",
+    "gwId",
+    "gw_id",
+    "parentId",
+    "parent_id",
+)
+
+
+def get_gateway_by_deviceid(device_id: str, cloud_data: dict) -> GATEWAY | None:
     """Return the gateway (id, data) of the sub-deviceID if existed in cloud_data."""
 
     if sub_device := cloud_data.get(device_id):
+        for key in GATEWAY_ID_KEYS:
+            gateway_id = sub_device.get(key)
+            gateway_data = cloud_data.get(gateway_id)
+            if gateway_data and not gateway_data.get(CONF_NODE_ID):
+                return GATEWAY(gateway_id, gateway_data)
+
+        sub_local_key = sub_device.get(CONF_LOCAL_KEY)
+        if not sub_local_key:
+            return None
+
         for dev_id, dev_data in cloud_data.items():
-            # Get gateway Assuming the LocalKey is the same gateway LocalKey!
+            # Get gateway assuming the local key is the same gateway local key.
             if (
                 dev_id != device_id
                 and not dev_data.get(CONF_NODE_ID)
-                and dev_data.get(CONF_LOCAL_KEY) == sub_device.get(CONF_LOCAL_KEY)
+                and dev_data.get(CONF_LOCAL_KEY) == sub_local_key
             ):
                 return GATEWAY(dev_id, dev_data)
+
+    return None
 
 
 ###############################
