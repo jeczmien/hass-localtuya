@@ -1391,6 +1391,14 @@ async def validate_input(entry_runtime: HassLocalTuyaData, data):
     if (dev_id := data.get(CONF_DEVICE_ID)) in cloud_data.device_list:
         cloud_dp_codes = await cloud_data.async_get_device_functions(dev_id)
 
+    if not detected_dps and cloud_dp_codes:
+        detected_dps = {dp_id: -1 for dp_id in cloud_dp_codes}
+        detected_dps_device = detected_dps.copy()
+        logger.info(
+            "Using cloud DPS because local DPS detection returned empty: %s",
+            detected_dps,
+        )
+
     # Indicate an error if no datapoints found as the rest of the flow
     # won't work in this case
     if not bypass_connection and error:

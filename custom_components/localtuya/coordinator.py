@@ -203,6 +203,15 @@ class TuyaDevice(TuyaListener, ContextualLogger):
                 force=True,
             )
 
+    @callback
+    def _dispatch_restored_status(self):
+        """Notify entities to restore from HA state without injecting fake DPS values."""
+        if self._fake_gateway:
+            return
+
+        self._last_update_time = time.monotonic()
+        self._dispatch_status()
+
     async def async_connect(self, _now=None) -> None:
         """Connect to device if not already connected."""
         if self.is_closing or self.is_connecting:
@@ -228,7 +237,7 @@ class TuyaDevice(TuyaListener, ContextualLogger):
     async def _make_connection(self):
         """Subscribe localtuya entity events."""
         if self.is_sleep and not self._status:
-            self.status_updated(RESTORE_STATES)
+            self._dispatch_restored_status()
 
         name, host = self._device_config.name, self._device_config.host
         retry = 0
@@ -314,7 +323,7 @@ class TuyaDevice(TuyaListener, ContextualLogger):
                             "Sub-device returned no initial status; using restored HA state until next update",
                             force=True,
                         )
-                        self.status_updated(RESTORE_STATES)
+                        self._dispatch_restored_status()
                     else:
                         raise Exception("Failed to retrieve status")
                 elif status:
@@ -330,7 +339,7 @@ class TuyaDevice(TuyaListener, ContextualLogger):
                             "Sub-device returned empty initial status; using restored HA state until next update",
                             force=True,
                         )
-                        self.status_updated(RESTORE_STATES)
+                        self._dispatch_restored_status()
                     else:
                         self.status_updated(status)
             except (UnicodeDecodeError, DecodeError) as e:
@@ -346,7 +355,7 @@ class TuyaDevice(TuyaListener, ContextualLogger):
                         f"Sub-device initial status is unavailable; using restored HA state until next update: {e}",
                         force=True,
                     )
-                    self.status_updated(RESTORE_STATES)
+                    self._dispatch_restored_status()
                 elif not (self._fake_gateway and "Not found" in str(e)):
                     self.warning(f"Handshake with {host} failed due to: {e}")
                     await self.abort_connect()
@@ -392,7 +401,7 @@ class TuyaDevice(TuyaListener, ContextualLogger):
                 self.subdevice_state_updated(SubdeviceState.ONLINE)
 
             if not self._status and "0" in self._device_config.manual_dps.split(","):
-                self.status_updated(RESTORE_STATES)
+                self._dispatch_restored_status()
 
             if self._pending_status:
                 await self.set_status()
@@ -678,6 +687,10 @@ class TuyaDevice(TuyaListener, ContextualLogger):
         """Device updated status."""
         if self._fake_gateway:
             # Fake gateways are only used to pass commands no need to update status.
+            return
+
+        if status == RESTORE_STATES:
+            self._dispatch_restored_status()
             return
 
         self._last_update_time = time.monotonic()
