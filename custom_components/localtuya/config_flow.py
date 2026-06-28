@@ -436,6 +436,20 @@ class LocalTuyaOptionsFlowHandler(OptionsFlow):
             dev_conf = self.config_entry.data[CONF_DEVICES][self.selected_device]
             self.dps_strings = dev_conf.get(CONF_DPS_STRINGS, gen_dps_strings())
             self.entities = dev_conf[CONF_ENTITIES]
+            _LOGGER.warning(
+                "[LOCALTUYA_DPS_DEBUG] edit_device selected=%s node_id=%s saved_dps=%s saved_entities=%s",
+                self.selected_device,
+                dev_conf.get(CONF_NODE_ID),
+                self.dps_strings,
+                [
+                    {
+                        "id": entity.get(CONF_ID),
+                        "platform": entity.get(CONF_PLATFORM),
+                        "name": entity.get(CONF_FRIENDLY_NAME),
+                    }
+                    for entity in self.entities
+                ],
+            )
             return await self.async_step_configure_device()
 
         devices = {}
@@ -657,11 +671,48 @@ class LocalTuyaOptionsFlowHandler(OptionsFlow):
         category = None
         node_id = self.nodeID
         device_data = self.cloud_data.device_list.get(dev_id)
+        _LOGGER.warning(
+            "[LOCALTUYA_DPS_DEBUG] auto_configure start dev_id=%s node_id=%s is_cloud=%s input_dps=%s device_data_present=%s",
+            dev_id,
+            node_id,
+            is_cloud,
+            self.dps_strings,
+            bool(device_data),
+        )
         if device_data:
             category = device_data.get(TUYA_CATEGORY, "")
+            _LOGGER.warning(
+                "[LOCALTUYA_DPS_DEBUG] auto_configure cloud_before dev_id=%s category=%s cloud_keys=%s dps_data_keys=%s dps_codes=%s",
+                dev_id,
+                category,
+                sorted(device_data.keys()),
+                sorted((device_data.get("dps_data") or {}).keys(), key=str),
+                {
+                    str(dp_id): dp_data.get("code")
+                    for dp_id, dp_data in (device_data.get("dps_data") or {}).items()
+                    if isinstance(dp_data, dict)
+                },
+            )
             if is_cloud and not device_data.get("dps_data"):
-                await self.cloud_data.async_get_device_functions(dev_id)
+                cloud_functions = await self.cloud_data.async_get_device_functions(dev_id)
                 device_data = self.cloud_data.device_list.get(dev_id)
+                _LOGGER.warning(
+                    "[LOCALTUYA_DPS_DEBUG] auto_configure cloud_loaded dev_id=%s returned_keys=%s stored_dps_keys=%s stored_codes=%s",
+                    dev_id,
+                    sorted((cloud_functions or {}).keys(), key=str),
+                    sorted(((device_data or {}).get("dps_data") or {}).keys(), key=str),
+                    {
+                        str(dp_id): dp_data.get("code")
+                        for dp_id, dp_data in (((device_data or {}).get("dps_data") or {}).items())
+                        if isinstance(dp_data, dict)
+                    },
+                )
+            elif is_cloud:
+                _LOGGER.warning(
+                    "[LOCALTUYA_DPS_DEBUG] auto_configure cloud_load_skipped dev_id=%s reason=existing_dps_data existing_keys=%s",
+                    dev_id,
+                    sorted((device_data.get("dps_data") or {}).keys(), key=str),
+                )
 
         localtuya_data = {
             DEVICE_CLOUD_DATA: device_data,
@@ -670,6 +721,19 @@ class LocalTuyaOptionsFlowHandler(OptionsFlow):
         }
 
         dev_data = gen_localtuya_entities(localtuya_data, category)
+        _LOGGER.warning(
+            "[LOCALTUYA_DPS_DEBUG] auto_configure result dev_id=%s category=%s entities=%s",
+            dev_id,
+            category,
+            [
+                {
+                    "id": entity.get(CONF_ID),
+                    "platform": entity.get(CONF_PLATFORM),
+                    "name": entity.get(CONF_FRIENDLY_NAME),
+                }
+                for entity in (dev_data or [])
+            ],
+        )
 
         # Process to add the device to localtuya HA Config.
         if dev_data:
@@ -1391,8 +1455,35 @@ async def validate_input(entry_runtime: HassLocalTuyaData, data):
     # Get DP descriptions from the cloud, if the device is there.
     cloud_dp_codes = {}
     cloud_data = entry_runtime.cloud_data
-    if (dev_id := data.get(CONF_DEVICE_ID)) in cloud_data.device_list:
+    dev_id = data.get(CONF_DEVICE_ID)
+    _LOGGER.warning(
+        "[LOCALTUYA_DPS_DEBUG] validate_input before_cloud dev_id=%s detected_dps=%s detected_device=%s bypass_connection=%s bypass_handshake=%s manual_dps=%s reset_ids=%s",
+        dev_id,
+        detected_dps,
+        detected_dps_device,
+        bypass_connection,
+        bypass_handshake,
+        data.get(CONF_MANUAL_DPS),
+        data.get(CONF_RESET_DPIDS),
+    )
+    if dev_id in cloud_data.device_list:
         cloud_dp_codes = await cloud_data.async_get_device_functions(dev_id)
+        _LOGGER.warning(
+            "[LOCALTUYA_DPS_DEBUG] validate_input cloud_result dev_id=%s cloud_keys=%s cloud_codes=%s",
+            dev_id,
+            sorted((cloud_dp_codes or {}).keys(), key=str),
+            {
+                str(dp_id): dp_data.get("code")
+                for dp_id, dp_data in (cloud_dp_codes or {}).items()
+                if isinstance(dp_data, dict)
+            },
+        )
+    else:
+        _LOGGER.warning(
+            "[LOCALTUYA_DPS_DEBUG] validate_input no_cloud_device dev_id=%s cloud_device_count=%s",
+            dev_id,
+            len(cloud_data.device_list),
+        )
 
     if not detected_dps and cloud_dp_codes:
         detected_dps = {dp_id: -1 for dp_id in cloud_dp_codes}
@@ -1415,8 +1506,16 @@ async def validate_input(entry_runtime: HassLocalTuyaData, data):
         raise EmptyDpsList
 
     logger.info("Total DPS: %s", detected_dps)
+    result_dps_strings = dps_string_list(detected_dps, cloud_dp_codes)
+    _LOGGER.warning(
+        "[LOCALTUYA_DPS_DEBUG] validate_input final dev_id=%s total_dps=%s result_dps_strings=%s protocol=%s",
+        dev_id,
+        detected_dps,
+        result_dps_strings,
+        conf_protocol,
+    )
     return {
-        CONF_DPS_STRINGS: dps_string_list(detected_dps, cloud_dp_codes),
+        CONF_DPS_STRINGS: result_dps_strings,
         CONF_PROTOCOL_VERSION: conf_protocol,
     }
 

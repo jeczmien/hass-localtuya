@@ -83,17 +83,68 @@ def gen_localtuya_entities(localtuya_data: dict, tuya_category: str) -> list[dic
     device_name: str = localtuya_data.get(CONF_FRIENDLY_NAME).strip()
     device_cloud_data: dict = localtuya_data.get(DEVICE_CLOUD_DATA, {})
     dps_data = device_cloud_data.get("dps_data", {})
+    original_detected_dps = list(detected_dps)
+    _LOGGER.warning(
+        "[LOCALTUYA_DPS_DEBUG] entity_gen start device=%s category=%s original_detected_dps=%s cloud_dps_keys=%s cloud_codes=%s cloud_category=%s",
+        device_name,
+        tuya_category,
+        original_detected_dps,
+        sorted((dps_data or {}).keys(), key=str),
+        {
+            str(dp_id): dp_data.get("code")
+            for dp_id, dp_data in (dps_data or {}).items()
+            if isinstance(dp_data, dict)
+        },
+        device_cloud_data.get(TUYA_CATEGORY),
+    )
     detected_dps = extend_detected_dps_with_cloud_data(detected_dps, dps_data)
+    _LOGGER.warning(
+        "[LOCALTUYA_DPS_DEBUG] entity_gen extended device=%s category=%s extended_detected_dps=%s",
+        device_name,
+        tuya_category,
+        detected_dps,
+    )
 
     if not tuya_category or not detected_dps:
+        _LOGGER.warning(
+            "[LOCALTUYA_DPS_DEBUG] entity_gen missing_input device=%s category=%s detected_dps=%s",
+            device_name,
+            tuya_category,
+            detected_dps,
+        )
         _LOGGER.debug(f"Missing category: {tuya_category} or DPS: {detected_dps}")
         return
 
     entities = {}
+    platforms_with_category = [
+        str(platform)
+        for platform, tuya_data in DATA_PLATFORMS.items()
+        if tuya_category in tuya_data
+    ]
+    _LOGGER.warning(
+        "[LOCALTUYA_DPS_DEBUG] entity_gen category_lookup device=%s category=%s platforms_with_category=%s all_cloud_codes=%s",
+        device_name,
+        tuya_category,
+        platforms_with_category,
+        sorted(
+            {
+                str(dp_data.get("code"))
+                for dp_data in (dps_data or {}).values()
+                if isinstance(dp_data, dict) and dp_data.get("code")
+            }
+        ),
+    )
 
     for platform, tuya_data in DATA_PLATFORMS.items():
         # TODO: Refactor needed here.
         if cat_data := tuya_data.get(tuya_category):
+            _LOGGER.warning(
+                "[LOCALTUYA_DPS_DEBUG] entity_gen platform_candidates device=%s category=%s platform=%s candidate_count=%s",
+                device_name,
+                tuya_category,
+                platform,
+                len(cat_data),
+            )
             for ent_data in cat_data:
                 main_confs = ent_data.data
                 localtuya_conf = ent_data.localtuya_conf
@@ -153,16 +204,49 @@ def gen_localtuya_entities(localtuya_data: dict, tuya_category: str) -> list[dic
                 if entity:
                     # Entity most contains ID
                     if not entity.get(CONF_ID):
+                        _LOGGER.warning(
+                            "[LOCALTUYA_DPS_DEBUG] entity_gen candidate_without_id device=%s category=%s platform=%s entity=%s localtuya_conf=%s",
+                            device_name,
+                            tuya_category,
+                            platform,
+                            entity,
+                            localtuya_conf,
+                        )
                         continue
                     # Workaround to Prevent duplicated id.
                     if entity[CONF_ID] in entities:
+                        _LOGGER.warning(
+                            "[LOCALTUYA_DPS_DEBUG] entity_gen duplicate_id device=%s category=%s platform=%s entity=%s existing=%s",
+                            device_name,
+                            tuya_category,
+                            platform,
+                            entity,
+                            entities.get(entity[CONF_ID]),
+                        )
                         _LOGGER.debug(f"{device_name}: Duplicated ID: {entity}")
                         continue
 
                     entity.update(main_confs)
                     entity[CONF_PLATFORM] = platform
                     entities[entity.get(CONF_ID)] = entity
+                    _LOGGER.warning(
+                        "[LOCALTUYA_DPS_DEBUG] entity_gen configured device=%s category=%s platform=%s entity=%s",
+                        device_name,
+                        tuya_category,
+                        platform,
+                        entity,
+                    )
                     _LOGGER.debug(f"{device_name}: Entity configured: {entity}")
+                else:
+                    _LOGGER.warning(
+                        "[LOCALTUYA_DPS_DEBUG] entity_gen no_match device=%s category=%s platform=%s localtuya_conf=%s contains_any=%s detected_dps=%s",
+                        device_name,
+                        tuya_category,
+                        platform,
+                        localtuya_conf,
+                        contains_any,
+                        detected_dps,
+                    )
 
     # sort entities by id
     sorted_ids = sorted(entities, key=int)
@@ -170,6 +254,22 @@ def gen_localtuya_entities(localtuya_data: dict, tuya_category: str) -> list[dic
     # convert to list of configs
     list_entities = [entities.get(id) for id in sorted_ids]
 
+    cloud_ids = {str(dp_id) for dp_id in (dps_data or {})}
+    configured_ids = {str(entity.get(CONF_ID)) for entity in list_entities}
+    unmatched_cloud_ids = sorted(cloud_ids - configured_ids, key=str)
+    _LOGGER.warning(
+        "[LOCALTUYA_DPS_DEBUG] entity_gen final device=%s category=%s configured_ids=%s unmatched_cloud_ids=%s unmatched_cloud_codes=%s entities=%s",
+        device_name,
+        tuya_category,
+        sorted(configured_ids, key=str),
+        unmatched_cloud_ids,
+        {
+            str(dp_id): dps_data.get(str(dp_id), {}).get("code")
+            for dp_id in unmatched_cloud_ids
+            if isinstance(dps_data.get(str(dp_id)), dict)
+        },
+        list_entities,
+    )
     _LOGGER.debug(f"{device_name}: Configured entities: {list_entities}")
     # return []
     return list_entities
