@@ -10,6 +10,7 @@ from homeassistant.const import (
     CONF_NAME,
 )
 
+import custom_components.localtuya as localtuya_init
 from custom_components.localtuya import config_flow
 from custom_components.localtuya.config_flow import LocalTuyaOptionsFlowHandler
 from custom_components.localtuya.const import (
@@ -38,6 +39,29 @@ class MockCloudData:
         return self.refresh_result
 
 
+class MockDeviceRegistry:
+    def __init__(self, existing_device_ids=()):
+        self.existing_device_ids = set(existing_device_ids)
+
+    def async_get_device(self, identifiers):
+        for domain, identifier in identifiers:
+            if (
+                domain == DOMAIN
+                and identifier.startswith("local_")
+                and identifier.removeprefix("local_") in self.existing_device_ids
+            ):
+                return object()
+        return None
+
+
+def _patch_device_registry(monkeypatch, existing_device_ids=()):
+    monkeypatch.setattr(
+        config_flow.dr,
+        "async_get",
+        lambda hass: MockDeviceRegistry(existing_device_ids),
+    )
+
+
 def _field_suggested_value(schema, field_name):
     for field in schema.schema:
         if field.schema == field_name:
@@ -45,7 +69,7 @@ def _field_suggested_value(schema, field_name):
     raise AssertionError(f"Field {field_name} not found in schema")
 
 
-def _make_options_flow(config_entry, cloud_data, discovered_devices):
+def _make_options_flow(config_entry, cloud_data, discovered_devices, entries=None):
     handler = LocalTuyaOptionsFlowHandler(config_entry)
     handler.config_entry = config_entry
     handler.hass = SimpleNamespace(
@@ -55,14 +79,30 @@ def _make_options_flow(config_entry, cloud_data, discovered_devices):
                 DATA_DISCOVERY: SimpleNamespace(devices=discovered_devices),
             }
         },
-        config_entries=SimpleNamespace(async_entries=lambda domain: []),
+        config_entries=SimpleNamespace(async_entries=lambda domain: entries or []),
     )
     handler.async_show_form = lambda **kwargs: kwargs
     return handler
 
 
-async def test_add_device_refreshes_cloud_before_merging_subdevices(caplog):
+def test_device_id_by_identifiers_uses_localtuya_identifier():
+    """Device removal should not depend on set iteration order."""
+    identifiers = {
+        ("other_domain", "something_else"),
+        (DOMAIN, "local_device_id_with_underscore"),
+    }
+
+    assert (
+        localtuya_init._device_id_by_identifiers(identifiers)
+        == "device_id_with_underscore"
+    )
+
+
+async def test_add_device_refreshes_cloud_before_merging_subdevices(
+    caplog, monkeypatch
+):
     """Add device should merge against a freshly refreshed Tuya Cloud device list."""
+    _patch_device_registry(monkeypatch)
     local_gateway = {
         CONF_TUYA_IP: "192.168.1.20",
         CONF_TUYA_GWID: "gateway_id",
@@ -113,8 +153,9 @@ async def test_add_device_refreshes_cloud_before_merging_subdevices(caplog):
     )
 
 
-async def test_add_device_logs_cloud_refresh_failure(caplog):
+async def test_add_device_logs_cloud_refresh_failure(caplog, monkeypatch):
     """Cloud refresh failures should be logged without blocking the Add device form."""
+    _patch_device_registry(monkeypatch)
     cloud_data = MockCloudData(device_list={}, refresh_result="cloud_error")
     config_entry = SimpleNamespace(
         entry_id="entry_id",
@@ -127,6 +168,81 @@ async def test_add_device_logs_cloud_refresh_failure(caplog):
 
     assert result["step_id"] == "add_device"
     assert "Failed to refresh Tuya cloud device list: cloud_error" in caplog.text
+
+
+async def test_add_device_allows_configured_device_missing_from_registry(monkeypatch):
+    """A removed HA device left in config data should be selectable again."""
+    _patch_device_registry(monkeypatch)
+    captured = {}
+
+    def mock_devices_schema(devices, cloud_devices_list):
+        captured["devices"] = devices
+        return "schema"
+
+    monkeypatch.setattr(config_flow, "devices_schema", mock_devices_schema)
+
+    cloud_data = MockCloudData(device_list={})
+    config_entry = SimpleNamespace(
+        entry_id="entry_id",
+        data={
+            CONF_NO_CLOUD: True,
+            CONF_DEVICES: {
+                "stale_device": {
+                    CONF_FRIENDLY_NAME: "Stale Device",
+                }
+            },
+        },
+    )
+    handler = _make_options_flow(
+        config_entry,
+        cloud_data,
+        {"stale_device": {CONF_TUYA_IP: "192.168.1.30"}},
+        entries=[config_entry],
+    )
+
+    result = await handler.async_step_add_device()
+
+    assert result["data_schema"] == "schema"
+    assert captured["devices"] == {"stale_device": "192.168.1.30"}
+
+
+async def test_add_device_hides_configured_device_still_in_registry(monkeypatch):
+    """A real configured HA device should still be hidden to avoid duplicates."""
+    _patch_device_registry(monkeypatch, {"configured_device"})
+    captured = {}
+
+    def mock_devices_schema(devices, cloud_devices_list):
+        captured["devices"] = devices
+        return "schema"
+
+    monkeypatch.setattr(config_flow, "devices_schema", mock_devices_schema)
+
+    cloud_data = MockCloudData(device_list={})
+    config_entry = SimpleNamespace(
+        entry_id="entry_id",
+        data={
+            CONF_NO_CLOUD: True,
+            CONF_DEVICES: {
+                "configured_device": {
+                    CONF_FRIENDLY_NAME: "Configured Device",
+                }
+            },
+        },
+    )
+    handler = _make_options_flow(
+        config_entry,
+        cloud_data,
+        {
+            "configured_device": {CONF_TUYA_IP: "192.168.1.30"},
+            "new_device": {CONF_TUYA_IP: "192.168.1.31"},
+        },
+        entries=[config_entry],
+    )
+
+    result = await handler.async_step_add_device()
+
+    assert result["data_schema"] == "schema"
+    assert captured["devices"] == {"new_device": "192.168.1.31"}
 
 
 async def test_configure_device_uses_cloud_defaults_for_entered_device_id(monkeypatch):

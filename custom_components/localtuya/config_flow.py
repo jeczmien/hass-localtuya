@@ -12,6 +12,7 @@ from typing import Any
 
 
 import homeassistant.helpers.config_validation as cv
+import homeassistant.helpers.device_registry as dr
 import homeassistant.helpers.entity_registry as er
 from homeassistant.helpers.selector import (
     SelectSelector,
@@ -373,6 +374,14 @@ class LocalTuyaOptionsFlowHandler(OptionsFlow):
         allDevices = mergeDevicesList(
             self.discovered_devices, self.cloud_data.device_list
         )
+        entries = self.hass.config_entries.async_entries(DOMAIN)
+        configured_Devices, removed_configured_devices = (
+            _configured_device_registry_status(self.hass, entries)
+        )
+        for dev_id, dev_conf in removed_configured_devices.items():
+            if dev_id not in allDevices:
+                allDevices[dev_id] = _discovery_data_from_config(dev_id, dev_conf)
+
         _LOGGER.debug(
             "Merged device list: local/discovered=%s cloud=%s merged=%s",
             len(self.discovered_devices),
@@ -383,11 +392,6 @@ class LocalTuyaOptionsFlowHandler(OptionsFlow):
         self.discovered_devices = allDevices
         devices = {}
         # To avoid duplicated entities we will get all devices in every hub.
-        entries = self.hass.config_entries.async_entries(DOMAIN)
-        configured_Devices = []
-        for entry in entries:
-            for devID in entry.data[CONF_DEVICES].keys():
-                configured_Devices.append(devID)
 
         for dev_id, dev in allDevices.items():
             if dev_id not in configured_Devices:
@@ -902,10 +906,7 @@ async def setup_localtuya_devices(
 
     # To avoid duplicated entities we will get all devices in every hub.
     entries = hass.config_entries.async_entries(DOMAIN)
-    configured_Devices = []
-    for entry in entries:
-        for devID in entry.data[CONF_DEVICES].keys():
-            configured_Devices.append(devID)
+    configured_Devices = _configured_device_ids(hass, entries)
 
     for dev_id, data in discovered_devices.items():
         # Skip configured devices.
@@ -960,6 +961,50 @@ async def setup_localtuya_devices(
         devices[dev_id].update({CONF_ENTITIES: dev_entites})
 
     return devices, fails
+
+
+def _configured_device_registry_status(
+    hass: HomeAssistant, entries: list[ConfigEntry]
+) -> tuple[set[str], dict[str, dict]]:
+    """Return configured device ids grouped by HA device registry presence."""
+    device_registry = dr.async_get(hass)
+    configured_devices = set()
+    removed_configured_devices = {}
+    for entry in entries:
+        for dev_id, dev_conf in entry.data[CONF_DEVICES].items():
+            if device_registry.async_get_device({(DOMAIN, f"local_{dev_id}")}):
+                configured_devices.add(dev_id)
+                continue
+
+            removed_configured_devices[dev_id] = dev_conf
+
+            _LOGGER.debug(
+                "Configured device %s in entry %s has no HA device registry entry; "
+                "allowing it in the add-device list",
+                dev_id,
+                entry.entry_id,
+            )
+    return configured_devices, removed_configured_devices
+
+
+def _configured_device_ids(hass: HomeAssistant, entries: list[ConfigEntry]) -> set[str]:
+    """Return configured device ids that still exist in HA's device registry."""
+    configured_devices, _ = _configured_device_registry_status(hass, entries)
+    return configured_devices
+
+
+def _discovery_data_from_config(dev_id: str, dev_conf: dict) -> dict:
+    """Build add-device discovery data from an orphaned stored device config."""
+    dev_data = {
+        CONF_TUYA_IP: dev_conf.get(CONF_HOST, ""),
+        CONF_TUYA_GWID: dev_id,
+        CONF_TUYA_VERSION: dev_conf.get(CONF_PROTOCOL_VERSION, "auto"),
+    }
+    if node_id := dev_conf.get(CONF_NODE_ID):
+        dev_data[CONF_NODE_ID] = node_id
+    if gateway_id := dev_conf.get(CONF_GATEWAY_ID):
+        dev_data[CONF_GATEWAY_ID] = gateway_id
+    return dev_data
 
 
 async def discover_devices() -> tuple[dict[str, dict], dict[str, str]]:

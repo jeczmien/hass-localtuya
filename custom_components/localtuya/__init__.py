@@ -402,6 +402,12 @@ async def async_remove_config_entry_device(
 ) -> bool:
     """Remove a config entry from a device."""
     dev_id = _device_id_by_identifiers(device_entry.identifiers)
+    if dev_id is None:
+        _LOGGER.warning(
+            "Unable to remove LocalTuya device; no LocalTuya identifier found in %s",
+            device_entry.identifiers,
+        )
+        return False
 
     ent_reg = er.async_get(hass)
     entities = {
@@ -476,6 +482,10 @@ def _run_async_listen(hass: HomeAssistant, entry: ConfigEntry):
         hass_localtuya: HassLocalTuyaData = hass.data[DOMAIN][entry.entry_id]
 
         dev_id = _device_id_by_identifiers(device_registry.identifiers)
+        if dev_id is None:
+            return
+        if dev_id not in entry.data[CONF_DEVICES]:
+            return
         host_ip = entry.data[CONF_DEVICES][dev_id][CONF_HOST]
 
         if cid := entry.data[CONF_DEVICES][dev_id].get(CONF_NODE_ID):
@@ -497,7 +507,10 @@ def _run_async_listen(hass: HomeAssistant, entry: ConfigEntry):
 
 def _device_id_by_identifiers(identifiers: set[tuple[str, str]]):
     """Return localtuya device ID by device registry identifiers."""
-    return list(identifiers)[0][1].split("_")[-1]
+    for domain, identifier in identifiers:
+        if domain == DOMAIN and identifier.startswith("local_"):
+            return identifier.removeprefix("local_")
+    return None
 
 
 @callback
@@ -520,7 +533,7 @@ def async_device_id_by_entity_id(hass: HomeAssistant, entity_id: str):
     ent_reg = er.async_get(hass)
     dev_reg = dr.async_get(hass)
     if device := dev_reg.async_get(ent_reg.async_get(entity_id).device_id):
-        return list(device.identifiers)[0][1].split("_")[-1]
+        return _device_id_by_identifiers(device.identifiers)
 
     return None
 
