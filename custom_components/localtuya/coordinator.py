@@ -249,13 +249,22 @@ class TuyaDevice(TuyaListener, ContextualLogger):
         except ValueError:
             return value
 
-    def _dispatch_cloud_initial_status(self) -> bool:
-        """Dispatch cloud-provided DPS values when local sub-device status is empty."""
-        if self._fake_gateway or not self._cloud_initial_status:
+    def _has_cloud_initial_status(self) -> bool:
+        """Return whether saved DPS strings include usable cloud values."""
+        return bool(self._cloud_initial_status) and not self._fake_gateway
+
+    def _dispatch_cloud_initial_status(self, reason: str = "initial status") -> bool:
+        """Dispatch cloud-provided DPS values when local status is unavailable.
+
+        This uses only values already stored in the config entry DPS strings. It
+        does not poll Tuya Cloud at runtime. It gives sleepy or gateway-backed
+        devices a useful initial state until the next local update.
+        """
+        if not self._has_cloud_initial_status():
             return False
 
         self.debug(
-            f"Using cloud DPS values as initial status: {self._cloud_initial_status}",
+            f"Using cloud DPS values as {reason}: {self._cloud_initial_status}",
             force=True,
         )
         self.status_updated(self._cloud_initial_status)
@@ -286,7 +295,10 @@ class TuyaDevice(TuyaListener, ContextualLogger):
     async def _make_connection(self):
         """Subscribe localtuya entity events."""
         if self.is_sleep and not self._status:
-            self._dispatch_restored_status()
+            if not self._dispatch_cloud_initial_status("sleeping device initial status"):
+                self._dispatch_restored_status()
+        elif not self._status:
+            self._dispatch_cloud_initial_status("initial status before local connection")
 
         name, host = self._device_config.name, self._device_config.host
         retry = 0
@@ -372,7 +384,7 @@ class TuyaDevice(TuyaListener, ContextualLogger):
                             "Sub-device returned no initial status; using cloud/restored HA state until next update",
                             force=True,
                         )
-                        if not self._dispatch_cloud_initial_status():
+                        if not self._dispatch_cloud_initial_status("empty local status"):
                             self._dispatch_restored_status()
                     else:
                         raise Exception("Failed to retrieve status")
@@ -389,7 +401,7 @@ class TuyaDevice(TuyaListener, ContextualLogger):
                             "Sub-device returned empty initial status; using cloud/restored HA state until next update",
                             force=True,
                         )
-                        if not self._dispatch_cloud_initial_status():
+                        if not self._dispatch_cloud_initial_status("empty local status"):
                             self._dispatch_restored_status()
                     else:
                         self.status_updated(status)
@@ -406,7 +418,7 @@ class TuyaDevice(TuyaListener, ContextualLogger):
                         f"Sub-device initial status is unavailable; using cloud/restored HA state until next update: {e}",
                         force=True,
                     )
-                    if not self._dispatch_cloud_initial_status():
+                    if not self._dispatch_cloud_initial_status("local status unavailable"):
                         self._dispatch_restored_status()
                 elif not (self._fake_gateway and "Not found" in str(e)):
                     self.warning(f"Handshake with {host} failed due to: {e}")
@@ -624,6 +636,11 @@ class TuyaDevice(TuyaListener, ContextualLogger):
             if self.connected or self.is_sleep:
                 self._task_shutdown_entities = None
                 return
+
+        if self._has_cloud_initial_status() and not self.is_closing:
+            self._dispatch_cloud_initial_status("disconnect fallback status")
+            self._task_shutdown_entities = None
+            return
 
         signal = f"localtuya_{self._device_config.id}"
         dispatcher_send(self.hass, signal, None)

@@ -96,7 +96,7 @@ def gen_localtuya_entities(localtuya_data: dict, tuya_category: str) -> list[dic
     device_cloud_data: dict = localtuya_data.get(DEVICE_CLOUD_DATA, {})
     dps_data = device_cloud_data.get("dps_data", {})
     original_detected_dps = list(detected_dps)
-    _LOGGER.warning(
+    _LOGGER.debug(
         "[LOCALTUYA_DPS_DEBUG] entity_gen start device=%s category=%s original_detected_dps=%s cloud_dps_keys=%s cloud_codes=%s cloud_category=%s",
         device_name,
         tuya_category,
@@ -110,7 +110,7 @@ def gen_localtuya_entities(localtuya_data: dict, tuya_category: str) -> list[dic
         device_cloud_data.get(TUYA_CATEGORY),
     )
     detected_dps = extend_detected_dps_with_cloud_data(detected_dps, dps_data)
-    _LOGGER.warning(
+    _LOGGER.debug(
         "[LOCALTUYA_DPS_DEBUG] entity_gen extended device=%s category=%s extended_detected_dps=%s",
         device_name,
         tuya_category,
@@ -133,7 +133,7 @@ def gen_localtuya_entities(localtuya_data: dict, tuya_category: str) -> list[dic
         for platform, tuya_data in DATA_PLATFORMS.items()
         if tuya_category in tuya_data
     ]
-    _LOGGER.warning(
+    _LOGGER.debug(
         "[LOCALTUYA_DPS_DEBUG] entity_gen category_lookup device=%s category=%s platforms_with_category=%s all_cloud_codes=%s",
         device_name,
         tuya_category,
@@ -272,7 +272,7 @@ def gen_localtuya_entities(localtuya_data: dict, tuya_category: str) -> list[dic
     cloud_ids = {str(dp_id) for dp_id in (dps_data or {})}
     configured_ids = {str(entity.get(CONF_ID)) for entity in list_entities}
     unmatched_cloud_ids = sorted(cloud_ids - configured_ids, key=str)
-    _LOGGER.warning(
+    _LOGGER.debug(
         "[LOCALTUYA_DPS_DEBUG] entity_gen final device=%s category=%s configured_ids=%s unmatched_cloud_ids=%s unmatched_cloud_codes=%s entities=%s",
         device_name,
         tuya_category,
@@ -297,11 +297,18 @@ def add_cloud_fallback_entities(
     device_name: str,
     tuya_category: str,
 ) -> None:
-    """Create entities directly from cloud model for unmapped DP definitions."""
+    """Create generic entities directly from the Tuya cloud model.
+
+    Category dictionaries remain the preferred source for known devices. This fallback
+    only fills DP definitions that are present in the cloud model but were not mapped
+    by the category dictionaries.
+    """
     if not dps_data:
         return
 
-    for dp_id in sorted(dps_data, key=lambda value: int(value) if str(value).isdigit() else str(value)):
+    skipped_unit_variants = []
+
+    for dp_id in sorted(dps_data, key=sort_dp_id):
         dp_id = str(dp_id)
         if dp_id in entities:
             continue
@@ -310,15 +317,20 @@ def add_cloud_fallback_entities(
         if not isinstance(dp_data, dict):
             continue
 
-        code = dp_data.get("code")
+        code = str(dp_data.get("code") or "")
         if not code:
             continue
 
-        dp_type = get_cloud_dp_type(dp_data)
-        if dp_type not in {"value", "enum"}:
+        if is_alternative_temperature_unit_dp(dp_data, dps_data):
+            skipped_unit_variants.append({"id": dp_id, "code": code})
             continue
 
-        access_mode = str(dp_data.get("accessMode") or dp_data.get("access_mode") or "").lower()
+        type_spec = get_cloud_type_spec(dp_data)
+        dp_type = get_cloud_dp_type(dp_data, type_spec)
+        if dp_type not in {"value", "enum", "bool", "boolean", "string"}:
+            continue
+
+        access_mode = cloud_access_mode(dp_data)
         platform = cloud_platform_for_dp(code, dp_type, access_mode)
         if platform is None:
             continue
@@ -327,12 +339,13 @@ def add_cloud_fallback_entities(
             CONF_ID: dp_id,
             CONF_FRIENDLY_NAME: cloud_friendly_name(code),
             CONF_PLATFORM: platform,
-            CONF_ENTITY_CATEGORY: cloud_entity_category(code, platform),
+            CONF_ENTITY_CATEGORY: cloud_entity_category(code, platform, access_mode),
         }
         apply_cloud_entity_defaults(entity, dps_data)
         entities[dp_id] = entity
-        _LOGGER.warning(
-            "[LOCALTUYA_DPS_DEBUG] entity_gen cloud_fallback device=%s category=%s platform=%s entity=%s cloud_data=%s",
+        _LOGGER.debug(
+            "[LOCALTUYA_DPS_DEBUG] entity_gen cloud_fallback "
+            "device=%s category=%s platform=%s entity=%s cloud_data=%s",
             device_name,
             tuya_category,
             platform,
@@ -340,9 +353,24 @@ def add_cloud_fallback_entities(
             dp_data,
         )
 
+    if skipped_unit_variants:
+        _LOGGER.debug(
+            "[LOCALTUYA_DPS_DEBUG] entity_gen skipped_unit_variants "
+            "device=%s category=%s skipped=%s",
+            device_name,
+            tuya_category,
+            skipped_unit_variants,
+        )
+
+
+def sort_dp_id(value):
+    """Sort numeric DP IDs numerically and other IDs lexicographically."""
+    value = str(value)
+    return (0, int(value)) if value.isdigit() else (1, value)
+
 
 def apply_cloud_entity_defaults(entity: dict, dps_data: dict) -> None:
-    """Apply unit, scaling and options from cloud model to an entity config."""
+    """Apply unit, scaling, limits and options from cloud model to an entity config."""
     dp_id = str(entity.get(CONF_ID))
     dp_data = dps_data.get(dp_id)
     if not isinstance(dp_data, dict):
@@ -351,15 +379,18 @@ def apply_cloud_entity_defaults(entity: dict, dps_data: dict) -> None:
     type_spec = get_cloud_type_spec(dp_data)
     dp_type = get_cloud_dp_type(dp_data, type_spec)
     code = str(dp_data.get("code") or "")
+    access_mode = cloud_access_mode(dp_data)
     platform = entity.get(CONF_PLATFORM)
 
     if platform == Platform.SENSOR:
-        if dp_type == "enum":
+        if dp_type in {"enum", "bool", "boolean", "string"}:
             entity.pop(CONF_DEVICE_CLASS, None)
             entity.pop(CONF_STATE_CLASS, None)
             entity.pop(CONF_UNIT_OF_MEASUREMENT, None)
             if entity.get(CONF_ENTITY_CATEGORY) in (None, "None"):
-                entity[CONF_ENTITY_CATEGORY] = cloud_entity_category(code, platform)
+                entity[CONF_ENTITY_CATEGORY] = cloud_entity_category(
+                    code, platform, access_mode
+                )
             return
 
         if dp_type == "value":
@@ -372,7 +403,9 @@ def apply_cloud_entity_defaults(entity: dict, dps_data: dict) -> None:
                 if device_class:
                     entity[CONF_DEVICE_CLASS] = device_class
             if entity.get(CONF_ENTITY_CATEGORY) in (None, "None"):
-                entity[CONF_ENTITY_CATEGORY] = cloud_entity_category(code, platform)
+                entity[CONF_ENTITY_CATEGORY] = cloud_entity_category(
+                    code, platform, access_mode
+                )
 
     elif platform == Platform.NUMBER:
         apply_cloud_unit(entity, type_spec, code)
@@ -384,14 +417,20 @@ def apply_cloud_entity_defaults(entity: dict, dps_data: dict) -> None:
         if "step" in type_spec and CONF_STEPSIZE not in entity:
             entity[CONF_STEPSIZE] = type_spec.get("step")
         if entity.get(CONF_ENTITY_CATEGORY) in (None, "None"):
-            entity[CONF_ENTITY_CATEGORY] = cloud_entity_category(code, platform)
+            entity[CONF_ENTITY_CATEGORY] = cloud_entity_category(
+                code, platform, access_mode
+            )
 
     elif platform == Platform.SELECT:
         options = type_spec.get("range")
         if isinstance(options, list) and CONF_OPTIONS not in entity:
-            entity[CONF_OPTIONS] = {str(option): cloud_option_name(option) for option in options}
+            entity[CONF_OPTIONS] = {
+                str(option): cloud_option_name(option) for option in options
+            }
         if entity.get(CONF_ENTITY_CATEGORY) in (None, "None"):
-            entity[CONF_ENTITY_CATEGORY] = cloud_entity_category(code, platform)
+            entity[CONF_ENTITY_CATEGORY] = cloud_entity_category(
+                code, platform, access_mode
+            )
 
 
 def get_cloud_type_spec(dp_data: dict) -> dict:
@@ -419,8 +458,19 @@ def get_cloud_dp_type(dp_data: dict, type_spec: dict | None = None) -> str:
     return dp_type
 
 
+def cloud_access_mode(dp_data: dict) -> str:
+    """Return normalized cloud access mode."""
+    return str(dp_data.get("accessMode") or dp_data.get("access_mode") or "").lower()
+
+
 def cloud_platform_for_dp(code: str, dp_type: str, access_mode: str):
     """Choose Home Assistant platform for a cloud DP definition."""
+    if dp_type in {"bool", "boolean"}:
+        # Boolean DPs often need platform-specific defaults such as state_on or
+        # restore/passive options. Existing category dictionaries handle those
+        # better than a generic fallback.
+        return None
+
     if dp_type == "enum":
         if "w" in access_mode:
             return Platform.SELECT
@@ -431,16 +481,24 @@ def cloud_platform_for_dp(code: str, dp_type: str, access_mode: str):
             return Platform.NUMBER
         return Platform.SENSOR
 
+    if dp_type == "string":
+        return Platform.SENSOR
+
     return None
 
 
 def is_measurement_code(code: str) -> bool:
     """Return whether a value code is a measurement even if cloud marks it writable."""
     code = code.lower()
+    if code.endswith("_set") or code.endswith("_set_f"):
+        return False
+    if any(token in code for token in ("sensitivity", "threshold", "limit")):
+        return False
     return any(
         token in code
         for token in (
             "current",
+            "cur_",
             "humidity",
             "temperature",
             "temp_current",
@@ -451,16 +509,19 @@ def is_measurement_code(code: str) -> bool:
             "moisture",
             "ph_current",
             "ec_current",
+            "conductivity",
         )
-    ) and not code.endswith("_set")
+    )
 
 
-def cloud_entity_category(code: str, platform) -> str | None:
+def cloud_entity_category(code: str, platform, access_mode: str = "") -> str | None:
     """Return entity category for cloud-generated entity."""
     code = code.lower()
     if platform in (Platform.NUMBER, Platform.SELECT):
         return "config"
-    if any(token in code for token in ("battery", "alarm", "fault", "status")):
+    if "w" in access_mode:
+        return "config"
+    if any(token in code for token in ("battery", "alarm", "fault", "status", "error")):
         return "diagnostic"
     return "None"
 
@@ -507,18 +568,47 @@ def normalize_cloud_unit(unit):
         return UnitOfTemperature.FAHRENHEIT
     if unit == "%":
         return PERCENTAGE
+    if unit in {"分钟", "min", "mins", "minute", "minutes"}:
+        return "min"
     return unit
+
+
+def is_alternative_temperature_unit_dp(dp_data: dict, dps_data: dict) -> bool:
+    """Skip duplicate Fahrenheit/Celsius DPs when a canonical DP exists.
+
+    Some Tuya models expose both metric and imperial DPs for the same value. LocalTuya
+    should not auto-create both sets because Home Assistant already has a unit system.
+    The canonical DP is the same code without the unit suffix, for example
+    temp_current over temp_current_f.
+    """
+    code = str(dp_data.get("code") or "").lower()
+    if not code:
+        return False
+
+    base_code = None
+    if code.endswith("_f") or code.endswith("_c"):
+        base_code = code[:-2]
+    if not base_code:
+        return False
+
+    for other_dp_data in dps_data.values():
+        if not isinstance(other_dp_data, dict):
+            continue
+        if str(other_dp_data.get("code") or "").lower() == base_code:
+            return True
+
+    return False
 
 
 def cloud_friendly_name(code: str) -> str:
     """Return readable entity name from cloud DP code."""
     overrides = {
         "temp_current": "Temperature",
-        "temp_current_f": "Temperature F",
         "humidity": "Humidity",
         "battery_state": "Battery Level",
         "battery_percentage": "Battery",
         "temp_unit_convert": "Temperature Unit",
+        "c_f": "Temperature Unit",
         "temp_alarm": "Temperature Alarm",
         "hum_alarm": "Humidity Alarm",
         "maxtemp_set": "Max Temperature",

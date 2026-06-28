@@ -288,19 +288,20 @@ class TuyaCloudApi:
 
         return resp["result"], "ok"
 
-    async def async_get_device_functions(self, device_id) -> dict[str, dict]:
+    async def async_get_device_functions(self, device_id, force_update=False) -> dict[str, dict]:
         """Pull Devices Properties and Specifications to devices_list"""
         cached = device_id in self.cached_device_list
-        self._logger.warning(
-            "[LOCALTUYA_DPS_DEBUG] cloud_functions start device_id=%s cached=%s cached_dps_keys=%s device_list_has_device=%s",
+        self._logger.debug(
+            "[LOCALTUYA_DPS_DEBUG] cloud_functions start device_id=%s cached=%s force_update=%s cached_dps_keys=%s device_list_has_device=%s",
             device_id,
             cached,
+            force_update,
             sorted((self.cached_device_list.get(device_id, {}).get("dps_data") or {}).keys(), key=str),
             device_id in self.device_list,
         )
-        if cached and (dps_data := self.cached_device_list[device_id].get("dps_data")):
+        if not force_update and cached and (dps_data := self.cached_device_list[device_id].get("dps_data")):
             self.device_list[device_id]["dps_data"] = dps_data
-            self._logger.warning(
+            self._logger.debug(
                 "[LOCALTUYA_DPS_DEBUG] cloud_functions returning_cached device_id=%s dps_keys=%s dps_codes=%s",
                 device_id,
                 sorted(dps_data.keys(), key=str),
@@ -321,7 +322,7 @@ class TuyaCloudApi:
         try:
             specs, query_props, query_model = await asyncio.gather(*get_data)
         except (Exception,) as ex:
-            self._logger.warning(
+            self._logger.debug(
                 "[LOCALTUYA_DPS_DEBUG] cloud_functions failed device_id=%s error=%s",
                 device_id,
                 ex,
@@ -356,7 +357,7 @@ class TuyaCloudApi:
                     ex,
                     query_model[0],
                 )
-        self._logger.warning(
+        self._logger.debug(
             "[LOCALTUYA_DPS_DEBUG] cloud_functions responses device_id=%s specs_status=%s specs_count=%s query_props_status=%s query_props_count=%s query_model_status=%s model_services=%s model_properties=%s",
             device_id,
             specs[1],
@@ -370,7 +371,7 @@ class TuyaCloudApi:
 
         if query_props[1] == "ok":
             device_data = {str(p["dp_id"]): p for p in query_props[0].get("properties")}
-            self._logger.warning(
+            self._logger.debug(
                 "[LOCALTUYA_DPS_DEBUG] cloud_functions after_query_props device_id=%s dps_keys=%s dps_codes=%s",
                 device_id,
                 sorted(device_data.keys(), key=str),
@@ -386,7 +387,7 @@ class TuyaCloudApi:
                     device_data[str(func["dp_id"])].update(func)
                 elif dp_id := func.get("dp_id"):
                     device_data[str(dp_id)] = func
-            self._logger.warning(
+            self._logger.debug(
                 "[LOCALTUYA_DPS_DEBUG] cloud_functions after_specs device_id=%s dps_keys=%s dps_codes=%s",
                 device_id,
                 sorted(device_data.keys(), key=str),
@@ -404,7 +405,7 @@ class TuyaCloudApi:
                 for service in services
                 for dp_data in (service.get("properties") or [])
             ]
-            self._logger.warning(
+            self._logger.debug(
                 "[LOCALTUYA_DPS_DEBUG] cloud_functions model_used device_id=%s services=%s properties=%s codes=%s",
                 device_id,
                 len(services),
@@ -430,14 +431,14 @@ class TuyaCloudApi:
                     "id": dp_id,
                     "accessMode": dp_data.get("accessMode"),
                     # values: json.loads later
-                    "values": str(dp_data.get("typeSpec")).replace("'", '"'),
+                    "values": json.dumps(dp_data.get("typeSpec") or {}),
                 }
                 if str(dp_id) in device_data:
                     device_data[str(dp_id)].update(refactored)
                 else:
                     refactored["code"] = dp_data.get("code")
                     device_data[str(dp_id)] = refactored
-            self._logger.warning(
+            self._logger.debug(
                 "[LOCALTUYA_DPS_DEBUG] cloud_functions after_model device_id=%s dps_keys=%s dps_codes=%s",
                 device_id,
                 sorted(device_data.keys(), key=str),
@@ -455,7 +456,7 @@ class TuyaCloudApi:
         if device_data:
             self.device_list[device_id]["dps_data"] = device_data
             self.cached_device_list.update({device_id: self.device_list[device_id]})
-            self._logger.warning(
+            self._logger.debug(
                 "[LOCALTUYA_DPS_DEBUG] cloud_functions stored device_id=%s final_dps_keys=%s final_codes=%s",
                 device_id,
                 sorted(device_data.keys(), key=str),
@@ -466,7 +467,7 @@ class TuyaCloudApi:
                 },
             )
         else:
-            self._logger.warning(
+            self._logger.debug(
                 "[LOCALTUYA_DPS_DEBUG] cloud_functions empty device_id=%s specs_status=%s query_props_status=%s query_model_status=%s",
                 device_id,
                 specs[1],
