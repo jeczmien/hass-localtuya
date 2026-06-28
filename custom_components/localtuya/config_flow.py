@@ -365,16 +365,36 @@ class LocalTuyaOptionsFlowHandler(OptionsFlow):
 
         self.discovered_devices = {}
         data = self.hass.data.get(DOMAIN)
-
+        cached_devices = {}
         if data and DATA_DISCOVERY in data:
-            self.discovered_devices = data[DATA_DISCOVERY].devices
-        else:
-            self.discovered_devices, errors = await discover_devices()
+            cached_devices = dict(data[DATA_DISCOVERY].devices or {})
+
+        fresh_devices, discovery_errors = await discover_devices()
+        errors.update(discovery_errors)
+
+        entries = self.hass.config_entries.async_entries(DOMAIN)
+        configured_gateways = {}
+        for entry in entries:
+            for dev_id, dev_conf in entry.data[CONF_DEVICES].items():
+                if dev_conf.get(CONF_NODE_ID):
+                    continue
+
+                gateway_id = dev_conf.get(CONF_DEVICE_ID, dev_id)
+                configured_gateways[gateway_id] = {
+                    CONF_TUYA_IP: dev_conf.get(CONF_HOST, ""),
+                    CONF_TUYA_GWID: gateway_id,
+                    CONF_TUYA_VERSION: dev_conf.get(CONF_PROTOCOL_VERSION, "auto"),
+                }
+
+        self.discovered_devices = {
+            **configured_gateways,
+            **cached_devices,
+            **fresh_devices,
+        }
 
         allDevices = mergeDevicesList(
             self.discovered_devices, self.cloud_data.device_list
         )
-        entries = self.hass.config_entries.async_entries(DOMAIN)
         configured_Devices, removed_configured_devices = (
             _configured_device_registry_status(self.hass, entries)
         )
