@@ -79,15 +79,15 @@ DEVICE_CLOUD_DATA = "device_cloud_data"
 
 def gen_localtuya_entities(localtuya_data: dict, tuya_category: str) -> list[dict]:
     """Return localtuya entities using the data that provided from TUYA"""
-    detected_dps: list = localtuya_data.get(CONF_DPS_STRINGS)
+    detected_dps: list = localtuya_data.get(CONF_DPS_STRINGS) or []
+    device_name: str = localtuya_data.get(CONF_FRIENDLY_NAME).strip()
+    device_cloud_data: dict = localtuya_data.get(DEVICE_CLOUD_DATA, {})
+    dps_data = device_cloud_data.get("dps_data", {})
+    detected_dps = extend_detected_dps_with_cloud_data(detected_dps, dps_data)
 
     if not tuya_category or not detected_dps:
         _LOGGER.debug(f"Missing category: {tuya_category} or DPS: {detected_dps}")
         return
-
-    device_name: str = localtuya_data.get(CONF_FRIENDLY_NAME).strip()
-    device_cloud_data: dict = localtuya_data.get(DEVICE_CLOUD_DATA, {})
-    dps_data = device_cloud_data.get("dps_data", {})
 
     entities = {}
 
@@ -173,6 +173,31 @@ def gen_localtuya_entities(localtuya_data: dict, tuya_category: str) -> list[dic
     _LOGGER.debug(f"{device_name}: Configured entities: {list_entities}")
     # return []
     return list_entities
+
+
+def extend_detected_dps_with_cloud_data(detected_dps: list, dps_data: dict) -> list:
+    """Add cloud-only DP definitions to detected DPS strings."""
+    extended_dps = list(detected_dps)
+    detected_ids = {str(dp_data).split(" ")[0] for dp_data in extended_dps}
+
+    for dp_id, dp_data in dps_data.items():
+        dp_id = str(dp_id)
+        if dp_id in detected_ids or not isinstance(dp_data, dict):
+            continue
+
+        dp_code = dp_data.get("code")
+        if not dp_code:
+            continue
+
+        extended_dps.append(format_cloud_dp(dp_id, dp_code, dp_data.get("value")))
+        detected_ids.add(dp_id)
+
+    return extended_dps
+
+
+def format_cloud_dp(dp_id: str, dp_code: str, value) -> str:
+    """Return a DPS string compatible with the existing entity matcher."""
+    return f"{dp_id} ( code: {dp_code} , value: {value} )"
 
 
 def parse_enum(dp_code: Enum) -> str:

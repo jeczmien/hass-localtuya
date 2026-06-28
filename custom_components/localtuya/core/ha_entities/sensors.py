@@ -184,12 +184,26 @@ SENSORS: dict[str, tuple[LocalTuyaEntity, ...]] = {
             # name="temperature",
             device_class=SensorDeviceClass.TEMPERATURE,
             state_class=SensorStateClass.MEASUREMENT,
+            custom_configs=localtuya_sensor(UnitOfTemperature.CELSIUS),
         ),
         LocalTuyaEntity(
             id=DPCode.HUMIDITY_VALUE,
             # name="humidity",
             device_class=SensorDeviceClass.HUMIDITY,
             state_class=SensorStateClass.MEASUREMENT,
+            custom_configs=localtuya_sensor(PERCENTAGE),
+        ),
+        LocalTuyaEntity(
+            id=DPCode.TEMP_ALARM,
+            name="Temperature Alarm",
+            icon="mdi:bell-alert",
+            entity_category=EntityCategory.DIAGNOSTIC,
+        ),
+        LocalTuyaEntity(
+            id=DPCode.HUM_ALARM,
+            name="Humidity Alarm",
+            icon="mdi:bell-alert",
+            entity_category=EntityCategory.DIAGNOSTIC,
         ),
         LocalTuyaEntity(
             id=DPCode.SMOKE_SENSOR_VALUE,
