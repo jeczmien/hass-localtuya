@@ -127,6 +127,12 @@ SELECTS: dict[str, tuple[LocalTuyaEntity, ...]] = {
                 }
             ),
         ),
+        LocalTuyaEntity(
+            id=(DPCode.C_F, DPCode.TEMP_UNIT_CONVERT),
+            name="Temperature Unit",
+            entity_category=EntityCategory.CONFIG,
+            custom_configs=localtuya_selector({"c": "Celsius", "f": "Fahrenheit"}),
+        ),
     ),
     # Heater
     "kt": (
