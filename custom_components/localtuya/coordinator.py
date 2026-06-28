@@ -109,6 +109,7 @@ class TuyaDevice(TuyaListener, ContextualLogger):
         self.dps_to_request = {}
         for dp in dev.dps_strings:
             self.dps_to_request[dp.split(" ")[0]] = None
+        self._cloud_initial_status = self._parse_dps_strings_status(dev.dps_strings)
 
         self.set_logger(_LOGGER, dev.id, dev.enable_debug, self.friendly_name)
 
@@ -211,6 +212,54 @@ class TuyaDevice(TuyaListener, ContextualLogger):
 
         self._last_update_time = time.monotonic()
         self._dispatch_status()
+
+    def _parse_dps_strings_status(self, dps_strings: list[str]) -> dict[str, Any]:
+        """Extract cloud-provided DPS values from saved DPS strings."""
+        status = {}
+        for dp in dps_strings or []:
+            dp = str(dp)
+            dp_id = dp.split(" ", 1)[0]
+            marker = " value: "
+            if not dp_id or marker not in dp:
+                continue
+
+            raw_value = dp.split(marker, 1)[1]
+            raw_value = raw_value.rsplit(" )", 1)[0]
+            raw_value = raw_value.replace(", cloud pull", "").strip()
+            if raw_value.lower() in {"", "none", "null"}:
+                continue
+
+            status[dp_id] = self._coerce_dps_string_value(raw_value)
+        return status
+
+    @staticmethod
+    def _coerce_dps_string_value(value: str):
+        """Convert a DPS string value to bool, int, float or string."""
+        lower_value = value.lower()
+        if lower_value == "true":
+            return True
+        if lower_value == "false":
+            return False
+        try:
+            return int(value)
+        except ValueError:
+            pass
+        try:
+            return float(value)
+        except ValueError:
+            return value
+
+    def _dispatch_cloud_initial_status(self) -> bool:
+        """Dispatch cloud-provided DPS values when local sub-device status is empty."""
+        if self._fake_gateway or not self._cloud_initial_status:
+            return False
+
+        self.debug(
+            f"Using cloud DPS values as initial status: {self._cloud_initial_status}",
+            force=True,
+        )
+        self.status_updated(self._cloud_initial_status)
+        return True
 
     async def async_connect(self, _now=None) -> None:
         """Connect to device if not already connected."""
@@ -320,10 +369,11 @@ class TuyaDevice(TuyaListener, ContextualLogger):
 
                     if self.is_subdevice:
                         self.debug(
-                            "Sub-device returned no initial status; using restored HA state until next update",
+                            "Sub-device returned no initial status; using cloud/restored HA state until next update",
                             force=True,
                         )
-                        self._dispatch_restored_status()
+                        if not self._dispatch_cloud_initial_status():
+                            self._dispatch_restored_status()
                     else:
                         raise Exception("Failed to retrieve status")
                 elif status:
@@ -336,10 +386,11 @@ class TuyaDevice(TuyaListener, ContextualLogger):
 
                     if self.is_subdevice:
                         self.debug(
-                            "Sub-device returned empty initial status; using restored HA state until next update",
+                            "Sub-device returned empty initial status; using cloud/restored HA state until next update",
                             force=True,
                         )
-                        self._dispatch_restored_status()
+                        if not self._dispatch_cloud_initial_status():
+                            self._dispatch_restored_status()
                     else:
                         self.status_updated(status)
             except (UnicodeDecodeError, DecodeError) as e:
@@ -352,10 +403,11 @@ class TuyaDevice(TuyaListener, ContextualLogger):
             except Exception as e:
                 if self.is_subdevice and "key" not in str(e).lower():
                     self.debug(
-                        f"Sub-device initial status is unavailable; using restored HA state until next update: {e}",
+                        f"Sub-device initial status is unavailable; using cloud/restored HA state until next update: {e}",
                         force=True,
                     )
-                    self._dispatch_restored_status()
+                    if not self._dispatch_cloud_initial_status():
+                        self._dispatch_restored_status()
                 elif not (self._fake_gateway and "Not found" in str(e)):
                     self.warning(f"Handshake with {host} failed due to: {e}")
                     await self.abort_connect()

@@ -398,12 +398,17 @@ class TuyaCloudApi:
             )
         if query_model[1] == "ok":
             model_data = json.loads(query_model[0]["model"])
-            services = model_data.get("services", [{}])[0]
-            properties = services.get("properties")
+            services = model_data.get("services") or []
+            properties = [
+                dp_data
+                for service in services
+                for dp_data in (service.get("properties") or [])
+            ]
             self._logger.warning(
-                "[LOCALTUYA_DPS_DEBUG] cloud_functions model_used device_id=%s used_first_service_only=True first_service_properties=%s first_service_codes=%s",
+                "[LOCALTUYA_DPS_DEBUG] cloud_functions model_used device_id=%s services=%s properties=%s codes=%s",
                 device_id,
-                len(properties or []),
+                len(services),
+                len(properties),
                 [
                     {
                         "id": dp_data.get("abilityId"),
@@ -413,22 +418,25 @@ class TuyaCloudApi:
                         if isinstance(dp_data.get("typeSpec"), dict)
                         else None,
                     }
-                    for dp_data in (properties or [])
+                    for dp_data in properties
                 ],
             )
-            for dp_data in properties if properties else {}:
+            for dp_data in properties:
+                dp_id = dp_data.get("abilityId")
+                if dp_id is None:
+                    continue
+
                 refactored = {
-                    "id": dp_data.get("abilityId"),
-                    # "code": dp_data.get("code"),
+                    "id": dp_id,
                     "accessMode": dp_data.get("accessMode"),
                     # values: json.loads later
                     "values": str(dp_data.get("typeSpec")).replace("'", '"'),
                 }
-                if str(dp_data["abilityId"]) in device_data:
-                    device_data[str(dp_data["abilityId"])].update(refactored)
+                if str(dp_id) in device_data:
+                    device_data[str(dp_id)].update(refactored)
                 else:
                     refactored["code"] = dp_data.get("code")
-                    device_data[str(dp_data["abilityId"])] = refactored
+                    device_data[str(dp_id)] = refactored
             self._logger.warning(
                 "[LOCALTUYA_DPS_DEBUG] cloud_functions after_model device_id=%s dps_keys=%s dps_codes=%s",
                 device_id,

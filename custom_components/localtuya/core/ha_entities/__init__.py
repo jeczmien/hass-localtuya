@@ -27,7 +27,18 @@
 import json
 from .base import LocalTuyaEntity, CONF_DPS_STRINGS, CLOUD_VALUE, DPType
 from enum import Enum
-from homeassistant.const import Platform, CONF_FRIENDLY_NAME, CONF_PLATFORM, CONF_ID
+from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
+from homeassistant.const import (
+    CONF_DEVICE_CLASS,
+    CONF_ENTITY_CATEGORY,
+    CONF_FRIENDLY_NAME,
+    CONF_ID,
+    CONF_PLATFORM,
+    CONF_UNIT_OF_MEASUREMENT,
+    PERCENTAGE,
+    Platform,
+    UnitOfTemperature,
+)
 
 import logging
 
@@ -49,6 +60,7 @@ from .switches import SWITCHES
 from .vacuums import VACUUMS
 from .locks import LOCKS
 from .water_heaters import WATER_HEATERS
+from ...const import CONF_MAX_VALUE, CONF_MIN_VALUE, CONF_OPTIONS, CONF_SCALING, CONF_STATE_CLASS, CONF_STEPSIZE
 
 # The supported PLATFORMS [ Platform: Data ]
 DATA_PLATFORMS = {
@@ -228,6 +240,7 @@ def gen_localtuya_entities(localtuya_data: dict, tuya_category: str) -> list[dic
 
                     entity.update(main_confs)
                     entity[CONF_PLATFORM] = platform
+                    apply_cloud_entity_defaults(entity, dps_data)
                     entities[entity.get(CONF_ID)] = entity
                     _LOGGER.warning(
                         "[LOCALTUYA_DPS_DEBUG] entity_gen configured device=%s category=%s platform=%s entity=%s",
@@ -247,6 +260,8 @@ def gen_localtuya_entities(localtuya_data: dict, tuya_category: str) -> list[dic
                         contains_any,
                         detected_dps,
                     )
+
+    add_cloud_fallback_entities(entities, dps_data, device_name, tuya_category)
 
     # sort entities by id
     sorted_ids = sorted(entities, key=int)
@@ -274,6 +289,263 @@ def gen_localtuya_entities(localtuya_data: dict, tuya_category: str) -> list[dic
     # return []
     return list_entities
 
+
+
+def add_cloud_fallback_entities(
+    entities: dict[str, dict],
+    dps_data: dict,
+    device_name: str,
+    tuya_category: str,
+) -> None:
+    """Create entities directly from cloud model for unmapped DP definitions."""
+    if not dps_data:
+        return
+
+    for dp_id in sorted(dps_data, key=lambda value: int(value) if str(value).isdigit() else str(value)):
+        dp_id = str(dp_id)
+        if dp_id in entities:
+            continue
+
+        dp_data = dps_data.get(dp_id)
+        if not isinstance(dp_data, dict):
+            continue
+
+        code = dp_data.get("code")
+        if not code:
+            continue
+
+        dp_type = get_cloud_dp_type(dp_data)
+        if dp_type not in {"value", "enum"}:
+            continue
+
+        access_mode = str(dp_data.get("accessMode") or dp_data.get("access_mode") or "").lower()
+        platform = cloud_platform_for_dp(code, dp_type, access_mode)
+        if platform is None:
+            continue
+
+        entity = {
+            CONF_ID: dp_id,
+            CONF_FRIENDLY_NAME: cloud_friendly_name(code),
+            CONF_PLATFORM: platform,
+            CONF_ENTITY_CATEGORY: cloud_entity_category(code, platform),
+        }
+        apply_cloud_entity_defaults(entity, dps_data)
+        entities[dp_id] = entity
+        _LOGGER.warning(
+            "[LOCALTUYA_DPS_DEBUG] entity_gen cloud_fallback device=%s category=%s platform=%s entity=%s cloud_data=%s",
+            device_name,
+            tuya_category,
+            platform,
+            entity,
+            dp_data,
+        )
+
+
+def apply_cloud_entity_defaults(entity: dict, dps_data: dict) -> None:
+    """Apply unit, scaling and options from cloud model to an entity config."""
+    dp_id = str(entity.get(CONF_ID))
+    dp_data = dps_data.get(dp_id)
+    if not isinstance(dp_data, dict):
+        return
+
+    type_spec = get_cloud_type_spec(dp_data)
+    dp_type = get_cloud_dp_type(dp_data, type_spec)
+    code = str(dp_data.get("code") or "")
+    platform = entity.get(CONF_PLATFORM)
+
+    if platform == Platform.SENSOR:
+        if dp_type == "enum":
+            entity.pop(CONF_DEVICE_CLASS, None)
+            entity.pop(CONF_STATE_CLASS, None)
+            entity.pop(CONF_UNIT_OF_MEASUREMENT, None)
+            if entity.get(CONF_ENTITY_CATEGORY) in (None, "None"):
+                entity[CONF_ENTITY_CATEGORY] = cloud_entity_category(code, platform)
+            return
+
+        if dp_type == "value":
+            apply_cloud_unit(entity, type_spec, code)
+            apply_cloud_scale(entity, type_spec)
+            if CONF_STATE_CLASS not in entity:
+                entity[CONF_STATE_CLASS] = SensorStateClass.MEASUREMENT
+            if CONF_DEVICE_CLASS not in entity:
+                device_class = cloud_sensor_device_class(code, type_spec)
+                if device_class:
+                    entity[CONF_DEVICE_CLASS] = device_class
+            if entity.get(CONF_ENTITY_CATEGORY) in (None, "None"):
+                entity[CONF_ENTITY_CATEGORY] = cloud_entity_category(code, platform)
+
+    elif platform == Platform.NUMBER:
+        apply_cloud_unit(entity, type_spec, code)
+        apply_cloud_scale(entity, type_spec)
+        if "min" in type_spec and CONF_MIN_VALUE not in entity:
+            entity[CONF_MIN_VALUE] = type_spec.get("min")
+        if "max" in type_spec and CONF_MAX_VALUE not in entity:
+            entity[CONF_MAX_VALUE] = type_spec.get("max")
+        if "step" in type_spec and CONF_STEPSIZE not in entity:
+            entity[CONF_STEPSIZE] = type_spec.get("step")
+        if entity.get(CONF_ENTITY_CATEGORY) in (None, "None"):
+            entity[CONF_ENTITY_CATEGORY] = cloud_entity_category(code, platform)
+
+    elif platform == Platform.SELECT:
+        options = type_spec.get("range")
+        if isinstance(options, list) and CONF_OPTIONS not in entity:
+            entity[CONF_OPTIONS] = {str(option): cloud_option_name(option) for option in options}
+        if entity.get(CONF_ENTITY_CATEGORY) in (None, "None"):
+            entity[CONF_ENTITY_CATEGORY] = cloud_entity_category(code, platform)
+
+
+def get_cloud_type_spec(dp_data: dict) -> dict:
+    """Return parsed type specification from cloud DP data."""
+    values = dp_data.get("values") or dp_data.get("typeSpec") or {}
+    if isinstance(values, dict):
+        return values
+    if not isinstance(values, str) or not values:
+        return {}
+    try:
+        return json.loads(values)
+    except (TypeError, ValueError):
+        try:
+            return json.loads(values.replace("'", '"'))
+        except (TypeError, ValueError):
+            return {}
+
+
+def get_cloud_dp_type(dp_data: dict, type_spec: dict | None = None) -> str:
+    """Return normalized cloud DP type."""
+    type_spec = type_spec if type_spec is not None else get_cloud_type_spec(dp_data)
+    dp_type = str(dp_data.get("type") or type_spec.get("type") or "").lower()
+    if dp_type == "integer":
+        return "value"
+    return dp_type
+
+
+def cloud_platform_for_dp(code: str, dp_type: str, access_mode: str):
+    """Choose Home Assistant platform for a cloud DP definition."""
+    if dp_type == "enum":
+        if "w" in access_mode:
+            return Platform.SELECT
+        return Platform.SENSOR
+
+    if dp_type == "value":
+        if "w" in access_mode and not is_measurement_code(code):
+            return Platform.NUMBER
+        return Platform.SENSOR
+
+    return None
+
+
+def is_measurement_code(code: str) -> bool:
+    """Return whether a value code is a measurement even if cloud marks it writable."""
+    code = code.lower()
+    return any(
+        token in code
+        for token in (
+            "current",
+            "humidity",
+            "temperature",
+            "temp_current",
+            "battery_percentage",
+            "battery_value",
+            "illuminance",
+            "lux",
+            "moisture",
+            "ph_current",
+            "ec_current",
+        )
+    ) and not code.endswith("_set")
+
+
+def cloud_entity_category(code: str, platform) -> str | None:
+    """Return entity category for cloud-generated entity."""
+    code = code.lower()
+    if platform in (Platform.NUMBER, Platform.SELECT):
+        return "config"
+    if any(token in code for token in ("battery", "alarm", "fault", "status")):
+        return "diagnostic"
+    return "None"
+
+
+def cloud_sensor_device_class(code: str, type_spec: dict):
+    """Infer sensor device class from code and unit."""
+    code = code.lower()
+    unit = normalize_cloud_unit(type_spec.get("unit"))
+    if unit in (UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT) or "temp" in code:
+        return SensorDeviceClass.TEMPERATURE
+    if unit == PERCENTAGE and any(token in code for token in ("hum", "humidity", "moisture")):
+        return SensorDeviceClass.HUMIDITY
+    if "battery" in code and unit == PERCENTAGE:
+        return SensorDeviceClass.BATTERY
+    return None
+
+
+def apply_cloud_unit(entity: dict, type_spec: dict, code: str) -> None:
+    """Apply unit from cloud metadata."""
+    unit = normalize_cloud_unit(type_spec.get("unit"))
+    if not unit:
+        return
+    entity[CONF_UNIT_OF_MEASUREMENT] = unit
+
+
+def apply_cloud_scale(entity: dict, type_spec: dict) -> None:
+    """Apply scale factor from cloud metadata."""
+    if "scale" not in type_spec:
+        return
+    try:
+        entity[CONF_SCALING] = 1 / (10 ** int(type_spec.get("scale") or 0))
+    except (TypeError, ValueError):
+        return
+
+
+def normalize_cloud_unit(unit):
+    """Normalize Tuya cloud units to Home Assistant units."""
+    if unit is None:
+        return None
+    unit = str(unit).strip()
+    if unit in {"℃", "˚C", "°C", "C"}:
+        return UnitOfTemperature.CELSIUS
+    if unit in {"℉", "˚F", "°F", "F"}:
+        return UnitOfTemperature.FAHRENHEIT
+    if unit == "%":
+        return PERCENTAGE
+    return unit
+
+
+def cloud_friendly_name(code: str) -> str:
+    """Return readable entity name from cloud DP code."""
+    overrides = {
+        "temp_current": "Temperature",
+        "temp_current_f": "Temperature F",
+        "humidity": "Humidity",
+        "battery_state": "Battery Level",
+        "battery_percentage": "Battery",
+        "temp_unit_convert": "Temperature Unit",
+        "temp_alarm": "Temperature Alarm",
+        "hum_alarm": "Humidity Alarm",
+        "maxtemp_set": "Max Temperature",
+        "minitemp_set": "Min Temperature",
+        "maxhum_set": "Max Humidity",
+        "minihum_set": "Min Humidity",
+        "temp_sensitivity": "Temperature Sensitivity",
+        "hum_sensitivity": "Humidity Sensitivity",
+        "report_sensitivity": "Report Period",
+    }
+    return overrides.get(code, code.replace("_", " ").title())
+
+
+def cloud_option_name(option) -> str:
+    """Return readable option name."""
+    option = str(option)
+    overrides = {
+        "c": "Celsius",
+        "f": "Fahrenheit",
+        "low": "Low",
+        "middle": "Middle",
+        "high": "High",
+        "loweralarm": "Lower Alarm",
+        "upperalarm": "Upper Alarm",
+        "cancel": "Cancel",
+    }
+    return overrides.get(option, option.replace("_", " ").title())
 
 def extend_detected_dps_with_cloud_data(detected_dps: list, dps_data: dict) -> list:
     """Add cloud-only DP definitions to detected DPS strings."""
