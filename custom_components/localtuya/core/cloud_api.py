@@ -288,10 +288,10 @@ class TuyaCloudApi:
 
         return resp["result"], "ok"
 
-    async def async_get_device_functions(self, device_id) -> dict[str, dict]:
+    async def async_get_device_functions(self, device_id, force_update: bool = False) -> dict[str, dict]:
         """Pull Devices Properties and Specifications to devices_list"""
         cached = device_id in self.cached_device_list
-        if cached and (dps_data := self.cached_device_list[device_id].get("dps_data")):
+        if not force_update and cached and (dps_data := self.cached_device_list[device_id].get("dps_data")):
             self.device_list[device_id]["dps_data"] = dps_data
             return dps_data
 
@@ -317,9 +317,11 @@ class TuyaCloudApi:
                     device_data[str(dp_id)] = func
         if query_model[1] == "ok":
             model_data = json.loads(query_model[0]["model"])
-            services = model_data.get("services", [{}])[0]
-            properties = services.get("properties")
-            for dp_data in properties if properties else {}:
+            services = model_data.get("services", [])
+            properties = []
+            for service in services:
+                properties.extend(service.get("properties") or [])
+            for dp_data in properties:
                 refactored = {
                     "id": dp_data.get("abilityId"),
                     # "code": dp_data.get("code"),
