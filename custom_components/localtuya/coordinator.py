@@ -155,6 +155,54 @@ class TuyaDevice(TuyaListener, ContextualLogger):
         """Set the entities associated with this device."""
         self._entities.extend(entities)
 
+    def _configured_dps_ids(self) -> list[int]:
+        """Return configured DPS IDs that can be explicitly requested."""
+        dps_ids = []
+
+        for dp_id in self.dps_to_request:
+            try:
+                dps_ids.append(int(dp_id))
+            except (TypeError, ValueError):
+                self.debug(f"Skipping invalid DPS id in request list: {dp_id}")
+
+        return dps_ids
+
+    def _missing_configured_dps(self, status: dict | None) -> list[int]:
+        """Return configured DPS IDs missing from a status payload."""
+        if not status:
+            return self._configured_dps_ids()
+
+        known_dps = {str(dp_id) for dp_id in status}
+        return [
+            dp_id
+            for dp_id in self._configured_dps_ids()
+            if str(dp_id) not in known_dps
+        ]
+
+    async def _request_configured_dps_update(
+        self, dps_ids: list[int] | None = None
+    ) -> None:
+        """Ask the device to publish the configured DPS values."""
+        if not self._interface or not self.connected:
+            return
+
+        dps_ids = dps_ids if dps_ids is not None else self._configured_dps_ids()
+        if not dps_ids:
+            return
+
+        self._interface.set_updatedps_list(dps_ids)
+
+        try:
+            await self._interface.update_dps(dps_ids, cid=self._node_id)
+            self.debug(f"Requested configured DPS update: {dps_ids}", force=True)
+        except TimeoutError:
+            self.debug(f"Timed out requesting configured DPS update: {dps_ids}", force=True)
+        except Exception as ex:  # pylint: disable=broad-except
+            self.debug(
+                f"Failed to request configured DPS update {dps_ids}: {ex}",
+                force=True,
+            )
+
     async def async_connect(self, _now=None) -> None:
         """Connect to device if not already connected."""
         if self.is_closing or self.is_connecting:
@@ -217,6 +265,8 @@ class TuyaDevice(TuyaListener, ContextualLogger):
                         self._device_config.enable_debug, self.friendly_name
                     )
                 self._interface.add_dps_to_request(self.dps_to_request)
+                if configured_dps := self._configured_dps_ids():
+                    self._interface.set_updatedps_list(configured_dps)
                 break  # Succeed break while loop
             except asyncio.CancelledError:
                 await self.abort_connect()
@@ -254,10 +304,35 @@ class TuyaDevice(TuyaListener, ContextualLogger):
 
                 self.debug("Retrieving initial state")
                 status = await self._interface.status(cid=self._node_id)
-                if status is None:
-                    raise Exception("Failed to retrieve status")
+                missing_dps = self._missing_configured_dps(status)
 
-                self.status_updated(status)
+                if status is None:
+                    await self._request_configured_dps_update()
+
+                    if self.is_subdevice:
+                        self.debug(
+                            "Sub-device returned no initial status; using restored HA state until next update",
+                            force=True,
+                        )
+                        self.status_updated(RESTORE_STATES)
+                    else:
+                        raise Exception("Failed to retrieve status")
+                elif status:
+                    self.status_updated(status)
+
+                    if missing_dps:
+                        await self._request_configured_dps_update(missing_dps)
+                else:
+                    await self._request_configured_dps_update()
+
+                    if self.is_subdevice:
+                        self.debug(
+                            "Sub-device returned empty initial status; using restored HA state until next update",
+                            force=True,
+                        )
+                        self.status_updated(RESTORE_STATES)
+                    else:
+                        self.status_updated(status)
             except (UnicodeDecodeError, DecodeError) as e:
                 self.exception(f"Handshake with {host} failed: due to {type(e)}: {e}")
                 await self.abort_connect()
@@ -266,11 +341,16 @@ class TuyaDevice(TuyaListener, ContextualLogger):
                 await self.abort_connect()
                 self._task_connect = None
             except Exception as e:
-                if not (self._fake_gateway and "Not found" in str(e)):
-                    e = "Sub device is not connected" if self.is_subdevice else e
+                if self.is_subdevice and "key" not in str(e).lower():
+                    self.debug(
+                        f"Sub-device initial status is unavailable; using restored HA state until next update: {e}",
+                        force=True,
+                    )
+                    self.status_updated(RESTORE_STATES)
+                elif not (self._fake_gateway and "Not found" in str(e)):
                     self.warning(f"Handshake with {host} failed due to: {e}")
                     await self.abort_connect()
-                    if self.is_subdevice or "key" in str(e):
+                    if "key" in str(e).lower():
                         # TODO: Add exceptions for pytuya.
                         update_localkey = True
             except:
@@ -421,10 +501,7 @@ class TuyaDevice(TuyaListener, ContextualLogger):
         if self.connected:
             self.debug("Refreshing dps for device")
             # This a workaround for >= 3.4 devices, since there is an issue on waiting for the correct seqno
-            try:
-                await self._interface.update_dps(cid=self._node_id)
-            except TimeoutError:
-                pass
+            await self._request_configured_dps_update()
 
     async def _async_reconnect(self):
         """Task: continuously attempt to reconnect to the device."""

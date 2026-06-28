@@ -29,6 +29,8 @@ from homeassistant.const import (
     PRECISION_HALVES,
     PRECISION_TENTHS,
     PRECISION_WHOLE,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
     UnitOfTemperature,
 )
 from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
@@ -513,6 +515,43 @@ class LocalTuyaClimate(LocalTuyaEntity, ClimateEntity):
 
         preset_value = self._preset_set.to_tuya(preset_mode)
         await self._device.set_dp(preset_value, self._preset_dp)
+
+    def status_restored(self, stored_state) -> None:
+        """Restore climate state after Home Assistant restart."""
+        super().status_restored(stored_state)
+
+        attrs = stored_state.attributes
+
+        if (target_temperature := attrs.get(ATTR_TEMPERATURE)) is not None:
+            self._target_temperature = target_temperature
+
+        if (current_temperature := attrs.get("current_temperature")) is not None:
+            self._current_temperature = current_temperature
+
+        if (preset_mode := attrs.get("preset_mode")) is not None:
+            self._preset_mode = preset_mode
+
+        if (swing_mode := attrs.get("swing_mode")) is not None:
+            self._swing_mode = swing_mode
+
+        if (swing_horizontal_mode := attrs.get("swing_horizontal_mode")) is not None:
+            self._swing_horizontal_mode = swing_horizontal_mode
+
+        if (hvac_action := attrs.get("hvac_action")) is not None:
+            try:
+                self._hvac_action = HVACAction(hvac_action)
+            except ValueError:
+                self._hvac_action = None
+
+        if stored_state.state == HVACMode.OFF:
+            self._hvac_mode = HVACMode.OFF
+            self._state = self._state_off
+        elif stored_state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            try:
+                self._hvac_mode = HVACMode(stored_state.state)
+                self._state = self._state_on
+            except ValueError:
+                self._hvac_mode = None
 
     def connection_made(self):
         """The connection has made with the device and status retrieved. configure entity based on it."""
